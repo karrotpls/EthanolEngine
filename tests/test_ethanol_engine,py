@@ -1,0 +1,17 @@
+import pytest
+import asyncio
+from app.ethanol_engine import calculate_burn_amount, trigger_burn_proposal
+
+@pytest.mark.asyncio
+async def test_calculate_burn_amount():
+    inflation_rate = 0.05
+    current_supply = 1_000_000
+    burn = await calculate_burn_amount(inflation_rate, current_supply)
+    assert burn == pytest.approx(25000.0, rel=1e-3)  # 5% * 1,000,000 * 0.5 = 25,000
+
+@pytest.mark.asyncio
+async def test_trigger_burn_proposal(capfd):
+    burn_amount = 12345.67
+    await trigger_burn_proposal(burn_amount)
+    out, _ = capfd.readouterr()
+    assert f"Drafting burn proposal for {burn_amount}" in out
