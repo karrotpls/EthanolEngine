@@ -1,0 +1,26 @@
+ethanol_engine/
+│
+├── app/
+│   ├── main.py                 # FastAPI entrypoint
+│   ├── models.py               # DB schema & ORM (SQLAlchemy)
+│   ├── db.py                   # DB connection & utils
+│   ├── vaults.py               # Vault management API
+│   ├── chain_listener.py       # On-chain event listener & processor
+│   ├── ethanol_engine.py       # Burn & rebalance logic
+│   ├── scheduler.py            # Periodic tasks & orchestration
+│   └── config.py               # Env vars & configs
+│
+├── requirements.txt
+└── Dockerfile
+
+
+Requirements.txt
+
+fastapi
+uvicorn[standard]
+sqlalchemy
+asyncpg
+web3[async]
+psycopg2-binary
+pydantic
+httpx
