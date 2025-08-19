@@ -1,0 +1,4 @@
+async def trigger_burn_proposal(burn_amount: float, dao_service: DaoProposalService):
+    result = await dao_service.submit_burn_proposal(burn_amount)
+    print(f"Proposal result: {result}")
+    return result
