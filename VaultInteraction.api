@@ -1,0 +1,77 @@
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from decimal import Decimal
+from datetime import datetime
+import psycopg2
+
+app = FastAPI()
+
+DB_DSN = "postgresql://user:pass@localhost:5432/mdx"
+
+class VaultAction(BaseModel):
+    user_address: str
+    asset_symbol: str
+    asset_address: str
+    amount: Decimal
+
+def get_conn():
+    return psycopg2.connect(DB_DSN)
+
+@app.post("/vault/deposit")
+def deposit(action: VaultAction):
+    conn = get_conn()
+    cur = conn.cursor()
+    # Find or create vault
+    cur.execute(
+        "SELECT vault_id, balance FROM cream_vaults WHERE user_address=%s AND asset_symbol=%s",
+        (action.user_address, action.asset_symbol),
+    )
+    row = cur.fetchone()
+    if row:
+        vault_id, balance = row
+        new_balance = balance + action.amount
+        cur.execute(
+            "UPDATE cream_vaults SET balance=%s, last_updated=now() WHERE vault_id=%s",
+            (new_balance, vault_id),
+        )
+    else:
+        cur.execute(
+            "INSERT INTO cream_vaults (user_address, asset_symbol, asset_address, balance) VALUES (%s,%s,%s,%s) RETURNING vault_id",
+            (action.user_address, action.asset_symbol, action.asset_address, action.amount),
+        )
+        vault_id = cur.fetchone()[0]
+    # Log event
+    cur.execute(
+        "INSERT INTO vault_events (vault_id, event_type, amount) VALUES (%s, %s, %s)",
+        (vault_id, "deposit", action.amount),
+    )
+    conn.commit()
+    conn.close()
+    return {"vault_id": vault_id, "new_balance": str(new_balance if row else action.amount)}
+
+@app.post("/vault/withdraw")
+def withdraw(action: VaultAction):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT vault_id, balance FROM cream_vaults WHERE user_address=%s AND asset_symbol=%s",
+        (action.user_address, action.asset_symbol),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Vault not found")
+    vault_id, balance = row
+    if balance < action.amount:
+        raise HTTPException(status_code=400, detail="Insufficient balance")
+    new_balance = balance - action.amount
+    cur.execute(
+        "UPDATE cream_vaults SET balance=%s, last_updated=now() WHERE vault_id=%s",
+        (new_balance, vault_id),
+    )
+    cur.execute(
+        "INSERT INTO vault_events (vault_id, event_type, amount) VALUES (%s, %s, %s)",
+        (vault_id, "withdraw", action.amount),
+    )
+    conn.commit()
+    conn.close()
+    return {"vault_id": vault_id, "new_balance": str(new_balance)}
