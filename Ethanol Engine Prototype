@@ -1,0 +1,295 @@
+# CDAI Ethanol Engine Prototype
+
+This repository contains a prototype for the Ethanol Engine (off-chain) + mocked on-chain skeleton contracts for BurnController and CreamVault.
+
+---
+
+# repo structure (single-file view)
+
+# /README.md
+# /contracts/BurnController.sol
+# /contracts/CreamVault.sol
+# /python_app/main.py            # FastAPI orchestrator (API + health)
+# /python_app/worker.py          # Ethanol Engine worker: tails mock events, scores actions, queues txs
+# /python_app/mock_oracle.py     # Mock oracle server that emits inflation events
+# /scripts/mock_deploy.sh        # quick local deploy using hardhat (assumes Node + Hardhat)
+# /docker-compose.yml           # optional, to run services locally
+
+---
+
+# README.md
+
+```
+CDAI Ethanol Engine Prototype
+
+Quick start (local dev):
+1. Start the mock oracle server (python):
+   cd python_app
+   python mock_oracle.py
+
+2. Run the FastAPI orchestrator:
+   uvicorn main:app --reload --port 8000
+
+3. Start the worker (in another terminal):
+   python worker.py
+
+Notes: This prototype uses a mocked oracle and a mocked signer. On-chain contract calls are simulated (or can be wired to a local Hardhat node by deploying the contracts in /contracts).
+```
+
+---
+
+# contracts/BurnController.sol
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.17;
+
+interface IERC20Minimal {
+    function balanceOf(address) external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
+    function burn(uint256 amount) external;
+}
+
+contract BurnController {
+    address public governor;
+    address public burnAddress = address(0xdead);
+    mapping(address => bool) public allowedTokens;
+
+    event BurnExecuted(address indexed token, uint256 amount, uint256 ts);
+    event AllowedTokenSet(address token, bool allowed);
+
+    modifier onlyGovernor() {
+        require(msg.sender == governor, "only governor");
+        _;
+    }
+
+    constructor(address _governor) {
+        governor = _governor;
+    }
+
+    function setAllowedToken(address token, bool allow) external onlyGovernor {
+        allowedTokens[token] = allow;
+        emit AllowedTokenSet(token, allow);
+    }
+
+    // governor calls this to burn tokens that this controller holds
+    function burnToken(address token, uint256 amount) external onlyGovernor {
+        require(allowedTokens[token], "token not allowed");
+        // try burn() on the token; if it doesn't exist, fallback transfer to burnAddress
+        // note: this try/catch assumes token implements burn; many don't.
+        try IERC20Minimal(token).burn(amount) {
+            // burned
+        } catch {
+            IERC20Minimal(token).transfer(burnAddress, amount);
+        }
+        emit BurnExecuted(token, amount, block.timestamp);
+    }
+}
+```
+
+---
+
+# contracts/CreamVault.sol
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.17;
+
+contract CreamVault {
+    address public governor;
+
+    struct Entry {
+        address token;
+        uint256 amount;
+        bytes32 mandalaHash; // IPFS or content hash
+        uint256 lockUntil;
+        string strategy; // short tag
+        address depositor;
+    }
+
+    Entry[] public entries;
+    event Deposited(uint256 indexed id, address token, uint256 amount, address depositor);
+    event Withdrawn(uint256 indexed id, address to);
+
+    modifier onlyGovernor() {
+        require(msg.sender == governor, "only governor");
+        _;
+    }
+
+    constructor(address _governor) {
+        governor = _governor;
+    }
+
+    function deposit(address token, uint256 amount, bytes32 mandalaHash, uint256 lockUntil, string calldata strategy) external {
+        // note: this prototype does not actually pull funds; real impl must transferFrom
+        entries.push(Entry({token: token, amount: amount, mandalaHash: mandalaHash, lockUntil: lockUntil, strategy: strategy, depositor: msg.sender}));
+        emit Deposited(entries.length - 1, token, amount, msg.sender);
+    }
+
+    function withdraw(uint256 id, address to) external onlyGovernor {
+        Entry storage e = entries[id];
+        require(block.timestamp >= e.lockUntil, "locked");
+        // real impl: transfer tokens
+        emit Withdrawn(id, to);
+        // mark zeroed
+        e.amount = 0;
+    }
+}
+```
+
+---
+
+# python_app/main.py
+
+```python
+from fastapi import FastAPI
+from pydantic import BaseModel
+import requests
+
+app = FastAPI(title="CDAI Ethanol Orchestrator")
+
+class Status(BaseModel):
+    worker_alive: bool
+    last_score: float | None = None
+
+ORACLE_URL = "http://127.0.0.1:9000/events"  # mock oracle
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+@app.get("/oracle_latest")
+async def oracle_latest():
+    r = requests.get(ORACLE_URL + "/latest")
+    return r.json()
+
+@app.get("/status", response_model=Status)
+async def status():
+    # stubbed; worker posts status to the orchestrator in a more complete impl
+    return Status(worker_alive=True, last_score=None)
+```
+
+---
+
+# python_app/mock_oracle.py
+
+```python
+# Simple Flask-like lightweight mock oracle using FastAPI
+from fastapi import FastAPI
+from pydantic import BaseModel
+import uvicorn
+import time
+import random
+
+app = FastAPI()
+
+class EmissionEvent(BaseModel):
+    protocol: str
+    emission_rate: float
+    supply_delta: float
+    timestamp: int
+
+# simple in-memory
+_EVENTS = []
+
+@app.post("/emit")
+def emit(event: EmissionEvent):
+    _EVENTS.append(event.dict())
+    return {"ok": True}
+
+@app.get("/latest")
+def latest():
+    if not _EVENTS:
+        # emit a default baseline
+        base = EmissionEvent(protocol="COMP", emission_rate=1000.0, supply_delta=0.01, timestamp=int(time.time()))
+        _EVENTS.append(base.dict())
+    return _EVENTS[-1]
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=9000)
+```
+
+---
+
+# python_app/worker.py
+
+```python
+"""
+Ethanol Engine worker (prototype):
+- polls mock oracle for latest event
+- computes a simple score
+- prints queued action (burn / rotate / hold)
+- can be extended to sign/send txs via web3
+"""
+import time
+import requests
+
+ORACLE_LATEST = "http://127.0.0.1:9000/latest"
+
+# policy knobs (tune these)
+BURN_THRESHOLD = 60.0
+ROTATE_THRESHOLD = 30.0
+MAX_BURN_PERCENT = 0.005  # 0.5%
+
+def compute_score(evt):
+    # simple normalized score
+    e_rate = evt.get("emission_rate", 0)
+    s_delta = evt.get("supply_delta", 0)
+    # normalize heuristics
+    score = min(100.0, (e_rate / 1000.0) * 40 + (s_delta * 100.0) * 60)
+    return score
+
+
+def decide_action(score):
+    if score >= BURN_THRESHOLD:
+        return "burn"
+    if score >= ROTATE_THRESHOLD:
+        return "rotate"
+    return "hold"
+
+
+def main_loop():
+    print("Ethanol worker starting... polling oracle")
+    while True:
+        try:
+            r = requests.get(ORACLE_LATEST)
+            evt = r.json()
+            score = compute_score(evt)
+            action = decide_action(score)
+            print(time.strftime("%Y-%m-%d %H:%M:%S"), "| event:", evt, "| score:", score, "| action:", action)
+            # here: build tx proposal, sign, push to queue (or call local mock executor)
+            # demo: if burn, compute amount
+            if action == "burn":
+                # compute a dummy amount (in production: based on exposure)
+                print("-> QUEUE: burn %.4f%% of exposure" % (MAX_BURN_PERCENT * 100.0))
+            elif action == "rotate":
+                print("-> QUEUE: rotate small tranche to Cream Vault")
+        except Exception as e:
+            print("worker error", e)
+        time.sleep(5)
+
+if __name__ == "__main__":
+    main_loop()
+```
+
+---
+
+# scripts/mock_deploy.sh
+
+```bash
+#!/usr/bin/env bash
+# quick placeholder: deploy contracts using hardhat (node + npm + hardhat required)
+# assumes Hardhat project in /contracts
+
+echo "This script is a placeholder. Use hardhat to compile + deploy the contracts to a local node."
+```
+
+---
+
+# next steps (suggested):
+# - wire worker to a local Hardhat node: use web3.py or ethers.js to craft txs calling BurnController.burnToken
+# - implement signing and multisig proposal flow (Gnosis Safe integration)
+# - add oracle aggregation and sanity checks
+# - implement CreamVault transfer logic (real ERC20 transfers with transferFrom)
+
+# end of textdoc
