@@ -1,0 +1,5 @@
+[Wallet Activity Stream] → [Agent Monitor] → [Risk Analyzer]
+        ↓                            ↓
+[Bounce Trigger?] ←—— [Policy Engine + Anomaly Detector]
+        ↓
+[Execute Bounce Tx] → [Confirmation + Logging + Alert]
