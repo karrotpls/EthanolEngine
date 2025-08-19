@@ -1,0 +1,17 @@
+def rebalance_vault(vault_id: int, target_ratio: Decimal = Decimal("1.5")):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT balance, collateral_ratio FROM cream_vaults WHERE vault_id=%s", (vault_id,))
+    row = cur.fetchone()
+    if not row:
+        return {"error": "Vault not found"}
+    balance, ratio = row
+    # Placeholder logic:
+    if ratio < target_ratio:
+        # trigger deposit or notify for comp injection
+        pass
+    elif ratio > target_ratio * 1.1:
+        # trigger withdraw or burn
+        pass
+    conn.close()
+    return {"vault_id": vault_id, "action": "rebalance checked"}
