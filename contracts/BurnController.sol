@@ -6,7 +6,7 @@ interface IERC20 {
 
 contract BurnController {
   address public governor; // multisig / timelock
-  address public burnAddress = 0x0000000000000000000000000000000000000000;
+  address public burnAddress = 0x0000000000000000000000000000000000000369;
   mapping(address => bool) public allowedTokens;
 
   modifier onlyGovernor() { require(msg.sender == governor); _; }
